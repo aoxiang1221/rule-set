@@ -1,0 +1,135 @@
+name: Build sing-box rule-set
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * *"
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set variables
+        run: |
+          echo "RELEASE_NAME=$(date +%Y%m%d)" >> $GITHUB_ENV
+          echo "ADRULES_REJECT_URL=https://raw.githubusercontent.com/Cats-Team/AdRules/main/dns.txt" >> $GITHUB_ENV
+        shell: bash
+
+#     检出当前仓库
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+        with:
+          path: repo
+
+#     用于生成 geosite.dat
+      - name: Checkout Loyalsoldier/domain-list-custom
+        uses: actions/checkout@v4
+        with:
+          repository: Loyalsoldier/domain-list-custom
+          path: custom
+
+      - name: Get latest go version
+        id: version
+        run: |
+          echo go_version=$(curl -s https://raw.githubusercontent.com/actions/go-versions/main/versions-manifest.json | grep -oE '"version": "[0-9]{1}.[0-9]{1,}(.[0-9]{1,})?"' | head -1 | cut -d':' -f2 | sed 's/ //g; s/"//g') >> $GITHUB_OUTPUT
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: ${{ steps.version.outputs.go_version }}
+          check-latest: true
+          cache-dependency-path: |
+             ./custom/go.sum
+             ./repo/sing-geosite/go.sum
+             ./repo/sing-geoip/go.sum
+
+      - name: get geosite.dat and geoip.dat
+        run: |
+          mkdir -p ./repo/out
+          cd ./repo/out
+          wget https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat
+          wget https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat
+
+#     获取拒绝域名并将其添加到相关的文件中
+      - name: Get and add reject domains into relevant file
+        run: |
+          curl -sSL $ADRULES_REJECT_URL | perl -ne '/^\|\|([-_0-9a-zA-Z]+(\.[-_0-9a-zA-Z]+){1,64})\^$/ && print "$1\n"' | perl -ne 'print if not /^[0-9]{1,3}(\.[0-9]{1,3}){3}$/' >> adrules.txt
+
+      - name: move relevant file
+        run: |
+          mkdir -p data
+          cat adrules.txt > ./data/adrules
+
+#     生成 geosite.dat 文件
+      - name: Build geosite.dat
+        run: |
+          cd custom
+          go run ./ --datapath=../data --exportlists= --togfwlist=
+
+#     移动 geosite.dat 文件
+      - name: move geosite.dat
+        run: |
+          mv ./custom/publish/geosite.dat ./repo/sing-geosite
+
+#     生成 geosite.db 文件和 geosite 规则集
+      - name: Build geosite.db
+        run: |
+          cd ./repo/sing-geosite
+          go run -v . -o ../out/geosite.db -r rule-set-me
+          go run -v . -i ../out/geosite.dat
+
+#     上传 geosite 规则集到 geosite 分支
+      - name: Release geosite rule sets
+        run: |
+          cd ./repo/sing-geosite
+          mv ./rule-set-me/* ./rule-set
+          chmod +x ./release-rule-set.sh
+          ./release-rule-set.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+#    生成 geoip.db 文件和 geoip 规则集
+      - name: Build geoip.db
+        run: |
+          cd ./repo/sing-geoip
+          go run -v . -o ../out/geoip.db
+
+#     上传 geoip 规则集到 geoip 分支
+      - name: Release geoip rule sets
+        run: |
+          cd ./repo/sing-geoip
+          chmod +x ./release-rule-set.sh
+          ./release-rule-set.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+#     上传 geosite 文件
+      - name: Upload geosite
+        uses: actions/upload-artifact@v3
+        with:
+          name: geosite
+          path: ./repo/out/geosite*
+
+#     上传 geoip 文件
+      - name: Upload geoip
+        uses: actions/upload-artifact@v3
+        with:
+          name: geoip
+          path: ./repo/out/geoip*
+
+#     上传文件到 releases
+      - name: Release and upload assets
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          release_name: ${{ env.RELEASE_NAME }}
+          tag: ${{ env.RELEASE_NAME }}
+          file_glob: true
+          file: ./repo/out/*
+
+#     移除旧的 releases
+      - name: Remove old releases
+        uses: dev-drprasad/delete-older-releases@v0.2.1
+        with:
+          keep_latest: 3
+          delete_tags: true
+        env: 
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
